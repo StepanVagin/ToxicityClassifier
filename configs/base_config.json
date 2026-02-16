@@ -1,0 +1,23 @@
+{
+  "seed": 42,
+  "data": {
+    "dataset_name": "jigsaw-toxic-comment-classification-challenge",
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "labels": ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
+  },
+  "paths": {
+    "data_dir": "./data/raw",
+    "processed_dir": "./data/processed",
+    "models_dir": "./models/saved",
+    "outputs_dir": "./outputs",
+    "logs_dir": "./logs"
+  },
+  "evaluation": {
+    "threshold_range": [0.1, 0.9],
+    "threshold_step": 0.05,
+    "confidence_thresholds": [0.3, 0.5, 0.7, 0.9],
+    "cv_folds": 5
+  }
+}
