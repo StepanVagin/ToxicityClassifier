@@ -92,7 +92,7 @@ def download_jigsaw_dataset(
         )
         print(f"Download complete")
     except Exception as e:
-        raise Exception(f"Failed to download dataset: {e}") from e
+        raise Exception(f"Failed to download dataset: {e}. Check if agreed on Late Submission: https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge/rules") from e
     
     # If extract_to is specified, extract train.csv
     if extract_to:

@@ -24,7 +24,7 @@ Usage:
 """
 
 import re
-from typing import List, Union
+from typing import List, Union, Optional
 
 import numpy as np
 import pandas as pd
