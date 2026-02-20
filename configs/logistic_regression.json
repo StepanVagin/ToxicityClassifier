@@ -1,0 +1,21 @@
+{
+  "model_type": "logistic_regression",
+  "preprocessing": {
+    "max_features": 10000,
+    "ngram_range": [1, 2],
+    "lowercase": true,
+    "remove_urls": true,
+    "remove_emails": true,
+    "strip_special_chars": true
+  },
+  "hyperparameters": {
+    "C": 1.0,
+    "max_iter": 100,
+    "class_weight": "balanced",
+    "solver": "lbfgs",
+    "multi_class": "ovr"
+  },
+  "training": {
+    "n_jobs": -1
+  }
+}

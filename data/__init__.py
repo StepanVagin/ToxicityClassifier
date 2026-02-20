@@ -28,6 +28,7 @@ Example usage:
         prepare_data_for_logistic_regression(train_df, val_df, test_df, config)
 """
 
+from data.download_dataset import ensure_dataset_ready, download_and_validate
 from data.downloader import (
     download_jigsaw_dataset,
     check_dataset_exists,
@@ -52,6 +53,9 @@ from data.data_loader import (
 )
 
 __all__ = [
+    # Download dataset
+    'ensure_dataset_ready',
+    'download_and_validate',
     # Downloader
     'download_jigsaw_dataset',
     'check_dataset_exists',
