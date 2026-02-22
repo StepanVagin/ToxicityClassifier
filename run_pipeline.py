@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 # Add project root for imports
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -90,11 +92,19 @@ def main() -> int:
     print("=" * 60)
     if args.skip_download:
         processed_dir = config.get("paths", {}).get("processed_dir", "./data/processed")
-        csv_path = base_path / processed_dir.replace("./", "") / "train.csv"
+        processed_path = base_path / processed_dir.replace("./", "")
+        csv_path = processed_path / "train.csv"
+        test_csv = processed_path / "test.csv"
+        test_labels_csv = processed_path / "test_labels.csv"
         if not csv_path.exists():
             print(f"Error: {csv_path} not found. Run without --skip-download first.")
             return 1
+        if not test_csv.exists() or not test_labels_csv.exists():
+            print(f"Error: test.csv and test_labels.csv required in {processed_path}")
+            print("Run without --skip-download to download the full dataset.")
+            return 1
         print(f"Using existing data: {csv_path}")
+        print(f"Test set: {test_csv}, {test_labels_csv}")
     else:
         csv_path = download_and_validate(base_path, verbose=True)
         print(f"Dataset ready: {csv_path}")
@@ -130,7 +140,8 @@ def main() -> int:
         tuned_thresholds = None
         print("Skipping tuning — using default threshold 0.5 for all labels.")
     else:
-        print("Tuning thresholds on validation set...")
+        optimize_f1 = eval_config.get("optimize_f1", "per_label")
+        print(f"Tuning thresholds on validation set (optimize: {optimize_f1} F1)...")
         tuned_thresholds = tune_thresholds(
             model=model,
             val_data=val_data,
@@ -138,10 +149,26 @@ def main() -> int:
             threshold_range=tuple(eval_config.get("threshold_range", [0.1, 0.9])),
             threshold_step=eval_config.get("threshold_step", 0.05),
             cv_folds=eval_config.get("cv_folds", 5),
+            optimize_f1=optimize_f1,
         )
         print("Tuned thresholds:")
         for label, thr in tuned_thresholds.items():                # ←
             print(f"  {label:<20} {thr:.2f}")
+        
+        # Re-evaluate validation set with tuned thresholds for fair comparison
+        print("\nRe-evaluating validation set with tuned thresholds...")
+        from evaluation.metrics import calculate_f1_scores
+        import numpy as np
+        X_val, y_val = val_data
+        y_val_proba = model.predict_proba(X_val)
+        y_val_pred = np.zeros_like(y_val_proba)
+        for i, label in enumerate(labels):
+            y_val_pred[:, i] = (y_val_proba[:, i] >= tuned_thresholds[label]).astype(int)
+        val_f1_with_tuned = calculate_f1_scores(y_val, y_val_pred)
+        val_metrics['f1_macro'] = val_f1_with_tuned['macro']
+        val_metrics['f1_micro'] = val_f1_with_tuned['micro']
+        val_metrics['f1_weighted'] = val_f1_with_tuned['weighted']
+        print(f"  Val F1 macro (with tuned thresholds): {val_f1_with_tuned['macro']:.4f}")
 
     # Evaluate on test set
     print("\n" + "=" * 60)
@@ -159,6 +186,10 @@ def main() -> int:
     # Summary
     metrics_file = outputs_dir / f"metrics_{model_type}.txt"       # ←
     cm_plot_file = outputs_dir / f"confusion_matrices_{model_type}.png"  # ←
+    fpr_recall_plot = outputs_dir / f"fpr_vs_recall_curves_{model_type}.png"
+    roc_gini_plot = outputs_dir / f"roc_auc_gini_{model_type}.png"
+    pr_curves_plot = outputs_dir / f"precision_recall_curves_{model_type}.png"
+    error_analysis_file = outputs_dir / f"error_analysis_{model_type}.txt"
 
     print("\n" + "=" * 60)
     print("Pipeline complete!")
@@ -169,10 +200,18 @@ def main() -> int:
     print(f"  Test F1 macro:   {test_results['f1_scores']['macro']:.4f}")
     print(f"  Test F1 micro:   {test_results['f1_scores']['micro']:.4f}")
     print(f"  Test F1 weighted:{test_results['f1_scores']['weighted']:.4f}")
+    roc_macro = np.nanmean(list(test_results['roc_auc_scores'].values()))
+    gini_macro = np.nanmean(list(test_results['gini_scores'].values()))
+    print(f"  Test ROC-AUC macro: {roc_macro:.4f}")
+    print(f"  Test Gini macro:   {gini_macro:.4f}")
     print()
     print("  Outputs:")                                             # ←
-    print(f"    Metrics report : {metrics_file}")                  # ←
-    print(f"    Confusion plots: {cm_plot_file}")                  # ←
+    print(f"    Metrics report      : {metrics_file.resolve()}")                  # ←
+    print(f"    Confusion plots     : {cm_plot_file.resolve()}")                  # ←
+    print(f"    FPR vs Recall curves: {fpr_recall_plot.resolve()}")
+    print(f"    ROC-AUC & Gini plot : {roc_gini_plot.resolve()}")
+    print(f"    PR curves           : {pr_curves_plot.resolve()}")
+    print(f"    Error analysis      : {error_analysis_file.resolve()}")
     print()
     print("  Per-label F1 (test):")                                # ←
     for label in labels:                                           # ←

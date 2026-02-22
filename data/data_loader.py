@@ -145,6 +145,126 @@ def split_data(
     return train_df, val_df, test_df
 
 
+def split_data_train_val(
+    df: pd.DataFrame,
+    config: Dict,
+    seed: int = 42,
+    stratify_column: str = "toxic"
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split dataset into train and validation sets only (no test split).
+    Used when test set comes from Kaggle test.csv + test_labels.csv.
+
+    Args:
+        df: Full DataFrame with text and labels.
+        config: Configuration dict with train_ratio, val_ratio (must sum to 1.0).
+        seed: Random seed for reproducibility.
+        stratify_column: Column for stratification.
+
+    Returns:
+        Tuple of (train_df, val_df).
+    """
+    if 'data' not in config:
+        raise KeyError("Config must contain 'data' section")
+
+    data_config = config['data']
+    train_ratio = data_config.get('train_ratio', 0.9)
+    val_ratio = data_config.get('val_ratio', 0.1)
+
+    if not np.isclose(train_ratio + val_ratio, 1.0):
+        raise ValueError(
+            f"train_ratio + val_ratio must sum to 1.0, got {train_ratio + val_ratio}"
+        )
+
+    if stratify_column not in df.columns:
+        raise KeyError(f"Stratify column '{stratify_column}' not found")
+
+    if len(df) < 100:
+        raise ValueError(f"Dataset too small: {len(df)} samples")
+
+    print(f"Splitting {len(df):,} samples into train/val (no test split)...")
+    print(f"  Ratios: {train_ratio:.1%} / {val_ratio:.1%}")
+    print(f"  Stratifying by: '{stratify_column}'")
+
+    train_df, val_df = train_test_split(
+        df,
+        test_size=val_ratio,
+        random_state=seed,
+        stratify=df[stratify_column]
+    )
+
+    print(f"\n  Train: {len(train_df):,} samples ({len(train_df)/len(df):.1%})")
+    print(f"  Val:   {len(val_df):,} samples ({len(val_df)/len(df):.1%})")
+    print(f"\n  '{stratify_column}' positive rate: Train {train_df[stratify_column].mean():.2%}, Val {val_df[stratify_column].mean():.2%}")
+
+    return train_df, val_df
+
+
+def load_kaggle_test_data(
+    processed_dir: Union[str, Path],
+    config: Dict,
+    text_column: str = "comment_text",
+    verbose: bool = True
+) -> pd.DataFrame:
+    """
+    Load Kaggle test set from test.csv + test_labels.csv.
+    Joins on id and filters out rows with -1 (not used for scoring).
+
+    Args:
+        processed_dir: Directory containing test.csv and test_labels.csv.
+        config: Configuration dict with 'data.labels' list.
+        text_column: Name of text column in test.csv.
+        verbose: If True, prints statistics.
+
+    Returns:
+        DataFrame with comment_text and label columns, ready for encoding.
+        Only includes rows where all labels are 0 or 1 (excludes -1 rows).
+    """
+    processed_dir = Path(processed_dir)
+    test_csv_path = processed_dir / "test.csv"
+    test_labels_path = processed_dir / "test_labels.csv"
+
+    if not test_csv_path.exists():
+        raise FileNotFoundError(
+            f"test.csv not found at {test_csv_path}. "
+            "Run download first (without --skip-download)."
+        )
+    if not test_labels_path.exists():
+        raise FileNotFoundError(
+            f"test_labels.csv not found at {test_labels_path}. "
+            "Run download first (without --skip-download)."
+        )
+
+    label_columns = config.get('data', {}).get('labels', [])
+    if not label_columns:
+        raise KeyError("Config must contain data.labels")
+
+    test_df = pd.read_csv(test_csv_path)
+    test_labels_df = pd.read_csv(test_labels_path)
+
+    # Filter out rows where any label is -1 (not used for Kaggle scoring)
+    mask = (test_labels_df[label_columns] >= 0).all(axis=1)
+    test_labels_filtered = test_labels_df[mask].copy()
+
+    # Join test.csv (comment_text) with test_labels on id
+    test_merged = test_df.merge(
+        test_labels_filtered,
+        on="id",
+        how="inner"
+    )
+
+    if verbose:
+        n_total = len(test_labels_df)
+        n_scored = len(test_merged)
+        n_excluded = n_total - n_scored
+        print(f"\nKaggle test set:")
+        print(f"  Total rows in test_labels.csv: {n_total:,}")
+        print(f"  Rows with -1 (excluded): {n_excluded:,}")
+        print(f"  Rows used for scoring: {n_scored:,}")
+
+    return test_merged
+
+
 def save_split_indices(
     train_idx: np.ndarray,
     val_idx: np.ndarray,
@@ -375,55 +495,50 @@ def load_and_prepare_data(
     indices_path: Optional[Union[str, Path]] = None
 ) -> Tuple[Tuple[List[str], np.ndarray], Tuple[List[str], np.ndarray], Tuple[List[str], np.ndarray]]:
     """
-    Complete pipeline: load CSV, split, and prepare data for training.
-    
-    Convenience function that combines loading, splitting, and preprocessing
-    into a single call.
-    
+    Complete pipeline: load train.csv, split 90/10 train/val, load Kaggle test set.
+
+    When config has test_ratio=0, uses:
+    - train.csv: 90% train, 10% validation
+    - test.csv + test_labels.csv: Kaggle test set (rows with -1 excluded)
+
     Args:
         csv_path: Path to the train.csv file.
         config: Configuration dictionary.
         seed: Random seed for reproducibility.
-        save_indices: If True, saves split indices to disk.
-        indices_path: Path to save/load split indices. If None, uses
-                     default path in processed directory.
-    
+        save_indices: If True, saves train/val split indices to disk.
+        indices_path: Path to save split indices. If None, uses default.
+
     Returns:
         Tuple of ((X_train, y_train), (X_val, y_val), (X_test, y_test)).
-    
-    Example:
-        >>> (X_train, y_train), (X_val, y_val), (X_test, y_test) = \
-        ...     load_and_prepare_data(
-        ...         csv_path="./data/processed/train.csv",
-        ...         config=config,
-        ...         seed=42
-        ...     )
     """
     csv_path = Path(csv_path)
-    
+    processed_dir = csv_path.parent
+
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
-    
-    print(f"Loading data from: {csv_path}")
+
+    print(f"Loading train data from: {csv_path}")
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df):,} samples")
-    
-    # Split data
-    train_df, val_df, test_df = split_data(df, config, seed=seed)
-    
-    # Save indices if requested
+
+    # Split train/val only (90/10)
+    train_df, val_df = split_data_train_val(df, config, seed=seed)
+
+    # Load Kaggle test set (test.csv + test_labels.csv)
+    test_df = load_kaggle_test_data(processed_dir, config, verbose=True)
+
+    # Save train/val indices if requested (test comes from separate files)
     if save_indices:
         if indices_path is None:
-            indices_path = csv_path.parent / "split_indices.pkl"
-        
+            indices_path = processed_dir / "split_indices.pkl"
         save_split_indices(
             train_df.index.values,
             val_df.index.values,
-            test_df.index.values,
+            np.array([], dtype=np.int64),  # Test from Kaggle, not from train split
             indices_path
         )
-    
-    # Prepare data
+
+    # Prepare data (clean text, encode labels)
     return prepare_data_for_logistic_regression(
         train_df, val_df, test_df, config
     )
