@@ -152,8 +152,17 @@ def main() -> int:
             optimize_f1=optimize_f1,
         )
         print("Tuned thresholds:")
-        for label, thr in tuned_thresholds.items():                # ←
+        for label, thr in tuned_thresholds.items():
             print(f"  {label:<20} {thr:.2f}")
+
+        # Save thresholds for inference
+        models_dir = config.get("paths", {}).get("models_dir", "./models/saved")
+        models_path = base_path / models_dir.replace("./", "")
+        models_path.mkdir(parents=True, exist_ok=True)
+        thresholds_file = models_path / f"{model_type}_thresholds.json"
+        with open(thresholds_file, "w") as f:
+            json.dump(tuned_thresholds, f, indent=2)
+        print(f"  Saved to: {thresholds_file}")
         
         # Re-evaluate validation set with tuned thresholds for fair comparison
         print("\nRe-evaluating validation set with tuned thresholds...")

@@ -524,6 +524,17 @@ def load_and_prepare_data(
     # Split train/val only (90/10)
     train_df, val_df = split_data_train_val(df, config, seed=seed)
 
+    # Optionally limit training set size (for faster experiments)
+    max_train = config.get("data", {}).get("max_train_samples")
+    if max_train is not None and len(train_df) > max_train:
+        train_df, _ = train_test_split(
+            train_df,
+            train_size=max_train,
+            random_state=seed,
+            stratify=train_df["toxic"],
+        )
+        print(f"Limited train set to {len(train_df):,} samples (max_train_samples={max_train})")
+
     # Load Kaggle test set (test.csv + test_labels.csv)
     test_df = load_kaggle_test_data(processed_dir, config, verbose=True)
 

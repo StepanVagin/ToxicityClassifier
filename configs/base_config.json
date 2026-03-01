@@ -5,7 +5,8 @@
     "train_ratio": 0.9,
     "val_ratio": 0.1,
     "test_ratio": 0,
-    "labels": ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
+    "labels": ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"],
+    "max_train_samples": null
   },
   "paths": {
     "data_dir": "./data/raw",
