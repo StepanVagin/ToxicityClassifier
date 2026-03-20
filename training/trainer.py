@@ -7,6 +7,7 @@ Orchestrates training, evaluation, and checkpoint saving.
 """
 
 import json
+import math
 import os
 import time
 from datetime import datetime
@@ -23,6 +24,24 @@ def _resolve_models_dir(save_dir: str) -> Path:
         return Path(save_dir)
     project_root = Path(__file__).resolve().parent.parent
     return (project_root / save_dir).resolve()
+
+
+def _sanitize_training_history_for_json(history: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Replace NaN/Inf in logged lists so metadata JSON is portable."""
+    if not history:
+        return {}
+    out: Dict[str, Any] = {}
+    for key, val in history.items():
+        if isinstance(val, list):
+            out[key] = [
+                None
+                if isinstance(x, float) and (math.isnan(x) or math.isinf(x))
+                else x
+                for x in val
+            ]
+        else:
+            out[key] = val
+    return out
 
 
 def train_model(
@@ -51,7 +70,8 @@ def train_model(
 
     Returns
     -------
-    Tuple[model, training_time_seconds, val_metrics]
+    Tuple[model, training_time_seconds, val_metrics, training_history]
+        training_history is a dict of epoch-wise logs (e.g. from ALBERT) or {}.
     """
     seed = config.get("seed", 42)
     np.random.seed(seed)
@@ -64,6 +84,8 @@ def train_model(
     start_time = time.perf_counter()
     model.train(train_data, val_data)
     training_time = time.perf_counter() - start_time
+
+    training_history: Dict[str, Any] = getattr(model, "training_history", None) or {}
 
     print(f"Training completed in {training_time:.2f}s")
 
@@ -88,9 +110,10 @@ def train_model(
         model_type=model_type,
         metrics=val_metrics,
         training_time=training_time,
+        training_history=training_history,
     )
 
-    return model, training_time, val_metrics
+    return model, training_time, val_metrics, training_history
 
 
 def evaluate_on_validation(
@@ -146,6 +169,7 @@ def save_checkpoint(
     model_type: str,
     metrics: Dict[str, Any],
     training_time: float,
+    training_history: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Save model and metadata to disk.
@@ -162,6 +186,8 @@ def save_checkpoint(
         Validation metrics (e.g. from evaluate_on_validation).
     training_time : float
         Training time in seconds.
+    training_history : dict, optional
+        Epoch-wise logs (e.g. train_loss, val_loss) stored in metadata JSON.
     """
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -178,6 +204,7 @@ def save_checkpoint(
         "training_time_seconds": round(training_time, 2),
         "model_size_mb": model_size_mb,
         "val_metrics": metrics,
+        "training_history": _sanitize_training_history_for_json(training_history),
     }
 
     metadata_path = save_path / f"{model_type}_metadata.json"

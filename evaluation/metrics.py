@@ -6,6 +6,10 @@ This module provides comprehensive evaluation metrics including:
 - F1 scores (macro, micro, weighted)
 - Per-label metrics (precision, recall, F1)
 - ROC-AUC and PR-AUC scores
+- Multilabel diagnostics: Hamming loss, subset (exact) accuracy, Jaccard (IoU)
+- Probabilistic scores: mean binary log loss, Brier score (per label + macro)
+- Ranking: label ranking average precision (LRAP), label ranking loss (on valid samples)
+- Agreement: Matthews correlation coefficient and Cohen's kappa per label
 - False Positive Rate analysis at different thresholds
 - Confusion matrices per label (text + matplotlib figure)
 - FPR vs. Recall curves at confidence thresholds
@@ -21,13 +25,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.metrics import (
+    auc,
+    cohen_kappa_score,
     confusion_matrix,
     f1_score,
+    hamming_loss,
+    jaccard_score,
+    label_ranking_average_precision_score,
+    label_ranking_loss,
+    matthews_corrcoef,
     precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
-    auc,
 )
 from sklearn.model_selection import KFold
 
@@ -204,6 +214,126 @@ def calculate_pr_auc(
             pr_auc_scores[label] = float("nan")
 
     return pr_auc_scores
+
+
+def calculate_subset_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Exact-match accuracy: fraction of samples where all labels match (multilabel subset accuracy).
+    """
+    return float(np.mean(np.all(y_true.astype(int) == y_pred.astype(int), axis=1)))
+
+
+def calculate_jaccard_scores(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """
+    Multilabel Jaccard (IoU) as macro / micro / samples averages.
+    """
+    yt, yp = y_true.astype(int), y_pred.astype(int)
+    return {
+        "macro": float(jaccard_score(yt, yp, average="macro", zero_division=0)),
+        "micro": float(jaccard_score(yt, yp, average="micro", zero_division=0)),
+        "samples": float(jaccard_score(yt, yp, average="samples", zero_division=0)),
+    }
+
+
+def calculate_multilabel_log_loss(
+    y_true: np.ndarray, y_pred_proba: np.ndarray, eps: float = 1e-15
+) -> float:
+    """
+    Mean binary cross-entropy over all sample–label pairs (natural multilabel log loss).
+    """
+    y = y_true.astype(np.float64)
+    p = np.clip(y_pred_proba.astype(np.float64), eps, 1.0 - eps)
+    loss = -(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
+    return float(np.mean(loss))
+
+
+def calculate_brier_multilabel(
+    y_true: np.ndarray, y_pred_proba: np.ndarray, labels: List[str]
+) -> Dict[str, object]:
+    """
+    Per-label Brier score (mean squared error between probability and 0/1 truth) and macro mean.
+    """
+    if y_true.shape[1] != len(labels):
+        raise ValueError(
+            f"Number of labels ({len(labels)}) doesn't match y_true columns ({y_true.shape[1]})"
+        )
+    per_label: Dict[str, float] = {}
+    y = y_true.astype(np.float64)
+    p = y_pred_proba.astype(np.float64)
+    for i, label in enumerate(labels):
+        per_label[label] = float(np.mean((p[:, i] - y[:, i]) ** 2))
+    macro = float(np.mean(list(per_label.values()))) if per_label else float("nan")
+    return {"per_label": per_label, "macro": macro}
+
+
+def calculate_matthews_corrcoef_per_label(
+    y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]
+) -> Dict[str, float]:
+    """Matthews correlation coefficient per label (undefined → nan if only one class present)."""
+    if y_true.shape[1] != len(labels):
+        raise ValueError(
+            f"Number of labels ({len(labels)}) doesn't match y_true columns ({y_true.shape[1]})"
+        )
+    out: Dict[str, float] = {}
+    for i, label in enumerate(labels):
+        if len(np.unique(y_true[:, i])) < 2:
+            out[label] = float("nan")
+        else:
+            out[label] = float(matthews_corrcoef(y_true[:, i], y_pred[:, i]))
+    return out
+
+
+def calculate_cohen_kappa_per_label(
+    y_true: np.ndarray, y_pred: np.ndarray, labels: List[str]
+) -> Dict[str, float]:
+    """Cohen's kappa per label for agreement beyond chance (undefined → nan when degenerate)."""
+    if y_true.shape[1] != len(labels):
+        raise ValueError(
+            f"Number of labels ({len(labels)}) doesn't match y_true columns ({y_true.shape[1]})"
+        )
+    out: Dict[str, float] = {}
+    for i, label in enumerate(labels):
+        if len(np.unique(y_true[:, i])) < 2:
+            out[label] = float("nan")
+            continue
+        try:
+            out[label] = float(cohen_kappa_score(y_true[:, i], y_pred[:, i]))
+        except ValueError:
+            out[label] = float("nan")
+    return out
+
+
+def calculate_label_ranking_metrics(
+    y_true: np.ndarray, y_pred_proba: np.ndarray
+) -> Dict[str, float]:
+    """
+    LRAP: average precision of ranked labels (sklearn multilabel).
+
+    Label ranking loss is restricted to samples with at least one positive and one negative
+    label, because sklearn's metric is undefined on all-negative or all-positive rows.
+    """
+    y = y_true.astype(int)
+    out: Dict[str, float] = {
+        "label_ranking_avg_precision": float("nan"),
+        "label_ranking_loss": float("nan"),
+    }
+    try:
+        out["label_ranking_avg_precision"] = float(
+            label_ranking_average_precision_score(y, y_pred_proba)
+        )
+    except ValueError:
+        pass
+
+    pos = y.sum(axis=1)
+    mask = (pos > 0) & (pos < y.shape[1])
+    if np.any(mask):
+        try:
+            out["label_ranking_loss"] = float(
+                label_ranking_loss(y[mask], y_pred_proba[mask])
+            )
+        except ValueError:
+            pass
+    return out
 
 
 def calculate_fpr_at_thresholds(
@@ -866,6 +996,15 @@ def evaluate_model(
     gini_scores     = calculate_gini_from_roc_auc(roc_auc_scores)
     pr_auc_scores   = calculate_pr_auc(y_test, y_pred_proba, labels)
 
+    hamming = float(hamming_loss(y_test, y_pred))
+    subset_accuracy = calculate_subset_accuracy(y_test, y_pred)
+    jaccard_scores = calculate_jaccard_scores(y_test, y_pred)
+    multilabel_log_loss = calculate_multilabel_log_loss(y_test, y_pred_proba)
+    brier = calculate_brier_multilabel(y_test, y_pred_proba, labels)
+    mcc_per_label = calculate_matthews_corrcoef_per_label(y_test, y_pred, labels)
+    kappa_per_label = calculate_cohen_kappa_per_label(y_test, y_pred, labels)
+    ranking_metrics = calculate_label_ranking_metrics(y_test, y_pred_proba)
+
     eval_config          = config.get("evaluation", {})
     confidence_thresholds = eval_config.get("confidence_thresholds", [0.3, 0.5, 0.7, 0.9])
     fpr_at_thresholds    = calculate_fpr_at_thresholds(
@@ -889,6 +1028,14 @@ def evaluate_model(
         "roc_auc_scores":     roc_auc_scores,
         "gini_scores":        gini_scores,
         "pr_auc_scores":      pr_auc_scores,
+        "hamming_loss":       hamming,
+        "subset_accuracy":    subset_accuracy,
+        "jaccard_scores":     jaccard_scores,
+        "multilabel_log_loss": multilabel_log_loss,
+        "brier_scores":       brier,
+        "matthews_corrcoef_per_label": mcc_per_label,
+        "cohen_kappa_per_label": kappa_per_label,
+        "label_ranking_metrics": ranking_metrics,
         "fpr_at_thresholds":  fpr_at_thresholds,
         "recall_at_thresholds": recall_at_thresholds,
         "confusion_matrices": cms,
@@ -946,6 +1093,63 @@ def evaluate_model(
         )
     except Exception as e:
         print(f"Warning: Could not save precision-recall curves: {e}")
+
+    from . import plots as eval_plots
+
+    try:
+        eval_plots.plot_metrics_heatmap(results, labels, outputs_path, model_type)
+    except Exception as e:
+        print(f"Warning: Could not save metrics heatmap: {e}")
+
+    try:
+        eval_plots.plot_roc_curves_per_label(
+            y_test, y_pred_proba, labels, outputs_path, model_type
+        )
+    except Exception as e:
+        print(f"Warning: Could not save ROC curve figure: {e}")
+
+    try:
+        eval_plots.plot_calibration_reliability(
+            y_test, y_pred_proba, labels, outputs_path, model_type
+        )
+    except Exception as e:
+        print(f"Warning: Could not save calibration plot: {e}")
+
+    try:
+        eval_plots.plot_test_summary_dashboard(results, labels, outputs_path, model_type)
+    except Exception as e:
+        print(f"Warning: Could not save test summary dashboard: {e}")
+
+    try:
+        eval_plots.plot_per_label_grouped_scores(results, labels, outputs_path, model_type)
+    except Exception as e:
+        print(f"Warning: Could not save per-label P/R/F1 chart: {e}")
+
+    try:
+        eval_plots.plot_mcc_kappa_per_label(results, labels, outputs_path, model_type)
+    except Exception as e:
+        print(f"Warning: Could not save MCC/kappa chart: {e}")
+
+    try:
+        eval_plots.plot_label_cooccurrence_correlation(
+            y_test, labels, outputs_path, model_type
+        )
+    except Exception as e:
+        print(f"Warning: Could not save label correlation heatmap: {e}")
+
+    try:
+        eval_plots.plot_predicted_probability_distributions(
+            y_pred_proba, labels, outputs_path, model_type
+        )
+    except Exception as e:
+        print(f"Warning: Could not save probability histograms: {e}")
+
+    try:
+        eval_plots.plot_labels_per_sample_distribution(
+            y_test, outputs_path, model_type
+        )
+    except Exception as e:
+        print(f"Warning: Could not save labels-per-sample histogram: {e}")
 
     return results
 
@@ -1202,24 +1406,55 @@ def save_metrics_to_file(
         f.write(f"ROC-AUC Macro: {roc_auc_macro:.3f}\n")
         f.write(f"Gini Macro:    {gini_macro:.3f}\n\n")
 
+        f.write("MULTILABEL & PROBABILISTIC METRICS\n")
+        f.write(f"Hamming loss (↓ better):           {results['hamming_loss']:.4f}\n")
+        f.write(f"Subset accuracy (exact match):   {results['subset_accuracy']:.4f}\n")
+        jac = results["jaccard_scores"]
+        f.write(
+            f"Jaccard — macro: {jac['macro']:.4f}  micro: {jac['micro']:.4f}  "
+            f"samples: {jac['samples']:.4f}\n"
+        )
+        f.write(
+            f"Mean multilabel log loss (↓):    {results['multilabel_log_loss']:.4f}\n"
+        )
+        f.write(
+            f"Brier score macro (↓):            {results['brier_scores']['macro']:.4f}\n"
+        )
+        lrm = results["label_ranking_metrics"]
+        lrap = lrm["label_ranking_avg_precision"]
+        lrl = lrm["label_ranking_loss"]
+        f.write(
+            f"Label ranking avg precision (↑): {lrap:.4f}\n"
+            if not np.isnan(lrap)
+            else "Label ranking avg precision (↑): N/A\n"
+        )
+        f.write(
+            f"Label ranking loss (↓, masked):   {lrl:.4f}\n"
+            if not np.isnan(lrl)
+            else "Label ranking loss (↓, masked):   N/A\n"
+        )
+        f.write("\n")
+
         # Per-label metrics
         f.write("PER-LABEL METRICS\n")
         f.write(
-            f"{'Label':<20} {'Precision':<10} {'Recall':<10} {'F1':<10} "
-            f"{'ROC-AUC':<10} {'Gini':<10} {'PR-AUC':<10}\n"
+            f"{'Label':<18} {'Prec':<8} {'Rec':<8} {'F1':<8} "
+            f"{'ROC':<8} {'Gini':<8} {'PR-AUC':<8} {'MCC':<8} {'Kappa':<8} {'Brier':<8}\n"
         )
-        f.write("-" * 90 + "\n")
+        f.write("-" * 110 + "\n")
         for label in labels:
             m       = results["per_label_metrics"][label]
             roc_auc = results["roc_auc_scores"][label]
             gini    = results["gini_scores"][label]
             pr_auc  = results["pr_auc_scores"][label]
-            roc_str = f"{roc_auc:.3f}" if not np.isnan(roc_auc) else "N/A"
-            gini_str = f"{gini:.3f}" if not np.isnan(gini) else "N/A"
-            pr_str  = f"{pr_auc:.3f}"  if not np.isnan(pr_auc)  else "N/A"
+            mcc     = results["matthews_corrcoef_per_label"][label]
+            kappa   = results["cohen_kappa_per_label"][label]
+            brier_l = results["brier_scores"]["per_label"][label]
+            fmt = lambda v: f"{v:.3f}" if not np.isnan(v) else "N/A"
             f.write(
-                f"{label:<20} {m['precision']:<10.3f} {m['recall']:<10.3f} {m['f1']:<10.3f} "
-                f"{roc_str:<10} {gini_str:<10} {pr_str:<10}\n"
+                f"{label:<18} {m['precision']:<8.3f} {m['recall']:<8.3f} {m['f1']:<8.3f} "
+                f"{fmt(roc_auc):<8} {fmt(gini):<8} {fmt(pr_auc):<8} "
+                f"{fmt(mcc):<8} {fmt(kappa):<8} {brier_l:<8.4f}\n"
             )
         f.write("\n")
 

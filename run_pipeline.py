@@ -8,6 +8,9 @@ Usage:
     # Default: uses configs/base_config.json + configs/logistic_regression.json
     python run_pipeline.py
 
+    # ALBERT on GPU (e.g. RTX 5060 8GB — uses FP16 + batch 16 in configs/albert.json):
+    python run_pipeline.py --config configs/albert.json
+
     # Custom config (merged with base):
     python run_pipeline.py --config configs/logistic_regression.json
 
@@ -16,6 +19,10 @@ Usage:
 
     # Skip threshold tuning (use default 0.5 for all labels):
     python run_pipeline.py --no-tune
+
+Outputs (under paths.outputs_dir) include training curves for neural models,
+plus evaluation figures: confusion matrices, ROC/PR/calibration, heatmaps,
+histograms, and a test summary dashboard.
 """
 
 import argparse
@@ -33,6 +40,7 @@ from data import download_and_validate, load_and_prepare_data
 from models import create_model
 from training import train_model
 from evaluation import tune_thresholds, evaluate_model
+from evaluation.plots import plot_training_history
 
 
 def load_config(base_path: Path, model_config_path: Path = None) -> dict:
@@ -127,9 +135,14 @@ def main() -> int:
     print("Step 3: Train model")
     print("=" * 60)
     model = create_model(config)
-    model, training_time, val_metrics = train_model(
+    model, training_time, val_metrics, training_history = train_model(
         model, train_data, val_data, config
     )
+
+    try:
+        plot_training_history(training_history, outputs_dir, model_type)
+    except Exception as e:
+        print(f"Warning: Could not save training curves: {e}")
 
     # Threshold tuning 
     print("\n" + "=" * 60)
@@ -199,6 +212,7 @@ def main() -> int:
     roc_gini_plot = outputs_dir / f"roc_auc_gini_{model_type}.png"
     pr_curves_plot = outputs_dir / f"precision_recall_curves_{model_type}.png"
     error_analysis_file = outputs_dir / f"error_analysis_{model_type}.txt"
+    training_curves_file = outputs_dir / f"training_curves_{model_type}.png"
 
     print("\n" + "=" * 60)
     print("Pipeline complete!")
@@ -213,6 +227,11 @@ def main() -> int:
     gini_macro = np.nanmean(list(test_results['gini_scores'].values()))
     print(f"  Test ROC-AUC macro: {roc_macro:.4f}")
     print(f"  Test Gini macro:   {gini_macro:.4f}")
+    print(f"  Hamming loss:      {test_results['hamming_loss']:.4f}")
+    print(f"  Subset accuracy:   {test_results['subset_accuracy']:.4f}")
+    lrap = test_results["label_ranking_metrics"]["label_ranking_avg_precision"]
+    if not np.isnan(lrap):
+        print(f"  LRAP:              {lrap:.4f}")
     print()
     print("  Outputs:")                                             # ←
     print(f"    Metrics report      : {metrics_file.resolve()}")                  # ←
@@ -221,6 +240,21 @@ def main() -> int:
     print(f"    ROC-AUC & Gini plot : {roc_gini_plot.resolve()}")
     print(f"    PR curves           : {pr_curves_plot.resolve()}")
     print(f"    Error analysis      : {error_analysis_file.resolve()}")
+    if training_history.get("epoch"):
+        print(f"    Training curves     : {training_curves_file.resolve()}")
+    eval_figures = [
+        ("Metrics heatmap", outputs_dir / f"metrics_heatmap_{model_type}.png"),
+        ("ROC curves (full)", outputs_dir / f"roc_curves_{model_type}.png"),
+        ("Calibration", outputs_dir / f"calibration_reliability_{model_type}.png"),
+        ("Test summary dashboard", outputs_dir / f"test_summary_dashboard_{model_type}.png"),
+        ("P/R/F1 by label", outputs_dir / f"per_label_precision_recall_f1_{model_type}.png"),
+        ("MCC & Cohen's κ", outputs_dir / f"mcc_kappa_per_label_{model_type}.png"),
+        ("Label correlation", outputs_dir / f"label_correlation_{model_type}.png"),
+        ("Probability histograms", outputs_dir / f"probability_histograms_{model_type}.png"),
+        ("Labels per sample", outputs_dir / f"labels_per_sample_hist_{model_type}.png"),
+    ]
+    for title, p in eval_figures:
+        print(f"    {title:22}: {p.resolve()}")
     print()
     print("  Per-label F1 (test):")                                # ←
     for label in labels:                                           # ←

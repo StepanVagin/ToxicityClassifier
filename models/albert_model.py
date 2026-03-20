@@ -7,7 +7,7 @@ Uses HuggingFace transformers with BCEWithLogitsLoss for multi-label classificat
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -121,6 +121,7 @@ class ALBERTModel(ModelABC):
         self.model.to(self.device)
 
         self._last_save_path: Optional[str] = None
+        self.training_history: Dict[str, List] = {}
 
     def train(self, train_data: Tuple, val_data: Optional[Tuple] = None) -> None:
         """
@@ -176,6 +177,16 @@ class ALBERTModel(ModelABC):
         criterion = torch.nn.BCEWithLogitsLoss()
         scaler = torch.amp.GradScaler("cuda") if self.fp16 and self.device.type == "cuda" else None
 
+        self.training_history = {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+            "val_f1_macro": [],
+            "val_f1_micro": [],
+            "val_f1_weighted": [],
+            "learning_rate": [],
+        }
+
         best_val_loss = float("inf")
         patience_counter = 0
 
@@ -220,9 +231,25 @@ class ALBERTModel(ModelABC):
             avg_loss = epoch_loss / len(train_loader)
             print(f"Epoch {epoch + 1}/{self.epochs} - Train loss: {avg_loss:.4f}")
 
+            ep = epoch + 1
+            self.training_history["epoch"].append(ep)
+            self.training_history["train_loss"].append(float(avg_loss))
+            self.training_history["learning_rate"].append(
+                float(scheduler.get_last_lr()[0])
+            )
+
             if val_loader is not None:
-                val_loss, val_f1 = self._evaluate(val_loader, criterion)
-                print(f"  Val loss: {val_loss:.4f} - Val F1 (macro): {val_f1:.4f}")
+                val_loss, val_f1_macro, val_f1_micro, val_f1_weighted = self._evaluate(
+                    val_loader, criterion
+                )
+                print(
+                    f"  Val loss: {val_loss:.4f} - Val F1 macro/micro/weighted: "
+                    f"{val_f1_macro:.4f} / {val_f1_micro:.4f} / {val_f1_weighted:.4f}"
+                )
+                self.training_history["val_loss"].append(float(val_loss))
+                self.training_history["val_f1_macro"].append(val_f1_macro)
+                self.training_history["val_f1_micro"].append(val_f1_micro)
+                self.training_history["val_f1_weighted"].append(val_f1_weighted)
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -235,8 +262,8 @@ class ALBERTModel(ModelABC):
 
     def _evaluate(
         self, data_loader: DataLoader, criterion: torch.nn.Module
-    ) -> Tuple[float, float]:
-        """Compute validation loss and macro F1."""
+    ) -> Tuple[float, float, float, float]:
+        """Compute validation loss and F1 (macro / micro / weighted) at threshold 0.5."""
         from sklearn.metrics import f1_score
 
         self.model.eval()
@@ -269,8 +296,10 @@ class ALBERTModel(ModelABC):
         all_labels = np.vstack(all_labels)
         avg_loss = total_loss / len(data_loader)
         f1_macro = float(f1_score(all_labels, all_preds, average="macro", zero_division=0))
+        f1_micro = float(f1_score(all_labels, all_preds, average="micro", zero_division=0))
+        f1_weighted = float(f1_score(all_labels, all_preds, average="weighted", zero_division=0))
 
-        return avg_loss, f1_macro
+        return avg_loss, f1_macro, f1_micro, f1_weighted
 
     def predict_proba(self, texts: List[str]) -> np.ndarray:
         """

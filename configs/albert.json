@@ -1,0 +1,19 @@
+{
+  "model_type": "albert",
+  "model_name": "albert-base-v2",
+  "preprocessing": {
+    "max_length": 128
+  },
+  "hyperparameters": {
+    "learning_rate": 2e-5,
+    "batch_size": 16,
+    "epochs": 3,
+    "warmup_steps": 500,
+    "weight_decay": 0.01
+  },
+  "training": {
+    "gradient_clip": 1.0,
+    "fp16": true,
+    "early_stopping_patience": 2
+  }
+}

@@ -52,9 +52,14 @@ def load_model_and_config(model_dir: Path, model_type: str = "logistic_regressio
             f"Model not found at {model_path}. Run training first: python run_pipeline.py"
         )
 
-    # Load config (merge base + model)
+    # Load config (merge base + model-specific defaults)
     config_path = PROJECT_ROOT / "configs" / "base_config.json"
-    model_config_path = PROJECT_ROOT / "configs" / "logistic_regression.json"
+    model_config_map = {
+        "logistic_regression": "logistic_regression.json",
+        "albert": "albert.json",
+    }
+    model_json = model_config_map.get(model_type, f"{model_type}.json")
+    model_config_path = PROJECT_ROOT / "configs" / model_json
     with open(config_path) as f:
         config = json.load(f)
     if model_config_path.exists():
