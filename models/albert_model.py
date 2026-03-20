@@ -138,6 +138,7 @@ class ALBERTModel(ModelABC):
         self.gradient_clip = train_cfg.get("gradient_clip", 1.0)
         self.fp16 = train_cfg.get("fp16", False)
         self.early_stopping_patience = train_cfg.get("early_stopping_patience", 2)
+        self.show_progress = train_cfg.get("show_progress", True)
 
         model_name = config.get("model_name", "albert-base-v2")
 
@@ -230,11 +231,27 @@ class ALBERTModel(ModelABC):
         best_val_loss = float("inf")
         patience_counter = 0
 
+        try:
+            from tqdm.auto import tqdm as _tqdm
+        except ImportError:
+            _tqdm = None
+
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss = 0.0
 
-            for batch in train_loader:
+            pbar = None
+            train_iter = train_loader
+            if self.show_progress and _tqdm is not None:
+                pbar = _tqdm(
+                    train_loader,
+                    desc=f"Epoch {epoch + 1}/{self.epochs}",
+                    leave=True,
+                    unit="batch",
+                )
+                train_iter = pbar
+
+            for batch_idx, batch in enumerate(train_iter, start=1):
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
@@ -266,7 +283,10 @@ class ALBERTModel(ModelABC):
                     optimizer.step()
 
                 scheduler.step()
-                epoch_loss += loss.item()
+                lv = loss.item()
+                epoch_loss += lv
+                if pbar is not None:
+                    pbar.set_postfix(loss=f"{epoch_loss / batch_idx:.4f}")
 
             avg_loss = epoch_loss / len(train_loader)
             print(f"Epoch {epoch + 1}/{self.epochs} - Train loss: {avg_loss:.4f}")

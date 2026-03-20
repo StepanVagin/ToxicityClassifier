@@ -13,6 +13,7 @@
   },
   "training": {
     "device": "auto",
+    "show_progress": true,
     "gradient_clip": 1.0,
     "fp16": true,
     "early_stopping_patience": 2
