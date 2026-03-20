@@ -20,6 +20,9 @@ Usage:
     # Skip threshold tuning (use default 0.5 for all labels):
     python run_pipeline.py --no-tune
 
+    # Skip training: load models/saved/{model_type}.pkl and run tuning (or load thresholds) + test eval:
+    python run_pipeline.py --config configs/albert.json --skip-download --eval-only
+
 Outputs (under paths.outputs_dir) include training curves for neural models,
 plus evaluation figures: confusion matrices, ROC/PR/calibration, heatmaps,
 histograms, and a test summary dashboard.
@@ -84,6 +87,16 @@ def main() -> int:
         action="store_true",
         help="Skip threshold tuning; use default 0.5 for all labels",
     )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Skip training; load saved model from models_dir (requires prior train).",
+    )
+    parser.add_argument(
+        "--retune-thresholds",
+        action="store_true",
+        help="With --eval-only, re-run CV threshold tuning instead of loading saved JSON.",
+    )
     args = parser.parse_args()
 
     base_path   = Path(__file__).resolve().parent
@@ -130,14 +143,50 @@ def main() -> int:
     val_data   = (X_val,   y_val)
     test_data  = (X_test,  y_test)
 
-    # Train model
+    models_dir = config.get("paths", {}).get("models_dir", "./models/saved")
+    models_path = base_path / models_dir.replace("./", "")
+    models_path.mkdir(parents=True, exist_ok=True)
+    model_pkl = models_path / f"{model_type}.pkl"
+    model_hf_dir = models_path / model_type
+    thresholds_file = models_path / f"{model_type}_thresholds.json"
+    metadata_file = models_path / f"{model_type}_metadata.json"
+
+    training_history: dict = {}
+    val_metrics: dict = {}
+
+    # Train or load model
     print("\n" + "=" * 60)
-    print("Step 3: Train model")
+    print("Step 3: Train model" if not args.eval_only else "Step 3: Load model (eval-only)")
     print("=" * 60)
-    model = create_model(config)
-    model, training_time, val_metrics, training_history = train_model(
-        model, train_data, val_data, config
-    )
+
+    if args.eval_only:
+        # Logistic regression: joblib file at {model_type}.pkl
+        # ALBERT / HF: directory {model_type}/ (trainer still passes *.pkl to save(); load strips .pkl)
+        if model_pkl.is_file():
+            load_target = model_pkl
+            model = create_model(config)
+            model.load(str(model_pkl))
+        elif model_hf_dir.is_dir():
+            load_target = model_hf_dir
+            model = create_model(config)
+            model.load(str(model_pkl))
+        else:
+            print(f"Error: no saved model at {model_hf_dir} or {model_pkl}")
+            print("Train first (without --eval-only), or check paths.models_dir and model_type.")
+            return 1
+        print(f"Loaded weights from {load_target.resolve()}")
+        training_time = 0.0
+        if metadata_file.exists():
+            with open(metadata_file, encoding="utf-8") as mf:
+                meta = json.load(mf)
+            val_metrics = dict(meta.get("val_metrics") or {})
+            training_time = float(meta.get("training_time_seconds", 0.0))
+            print(f"  (metadata: training_time_seconds={training_time}, val F1 macro~ {val_metrics.get('f1_macro', 'n/a')})")
+    else:
+        model = create_model(config)
+        model, training_time, val_metrics, training_history = train_model(
+            model, train_data, val_data, config
+        )
 
     try:
         plot_training_history(training_history, outputs_dir, model_type)
@@ -149,9 +198,30 @@ def main() -> int:
     print("Step 4: Threshold tuning")
     print("=" * 60)
 
-    if args.no_tune:                                                # ←
+    if args.no_tune:
         tuned_thresholds = None
         print("Skipping tuning — using default threshold 0.5 for all labels.")
+    elif (
+        args.eval_only
+        and thresholds_file.exists()
+        and not args.retune_thresholds
+    ):
+        with open(thresholds_file, encoding="utf-8") as tf:
+            tuned_thresholds = json.load(tf)
+        print(f"Loaded thresholds from {thresholds_file.resolve()}")
+        print("  (use --retune-thresholds to re-run CV tuning)")
+        from evaluation.metrics import calculate_f1_scores
+
+        X_val, y_val = val_data
+        y_val_proba = model.predict_proba(X_val)
+        y_val_pred = np.zeros_like(y_val_proba)
+        for i, label in enumerate(labels):
+            y_val_pred[:, i] = (y_val_proba[:, i] >= tuned_thresholds[label]).astype(int)
+        val_f1_with_tuned = calculate_f1_scores(y_val, y_val_pred)
+        val_metrics["f1_macro"] = val_f1_with_tuned["macro"]
+        val_metrics["f1_micro"] = val_f1_with_tuned["micro"]
+        val_metrics["f1_weighted"] = val_f1_with_tuned["weighted"]
+        print(f"  Val F1 macro (with loaded thresholds): {val_f1_with_tuned['macro']:.4f}")
     else:
         optimize_f1 = eval_config.get("optimize_f1", "per_label")
         print(f"Tuning thresholds on validation set (optimize: {optimize_f1} F1)...")
@@ -168,28 +238,22 @@ def main() -> int:
         for label, thr in tuned_thresholds.items():
             print(f"  {label:<20} {thr:.2f}")
 
-        # Save thresholds for inference
-        models_dir = config.get("paths", {}).get("models_dir", "./models/saved")
-        models_path = base_path / models_dir.replace("./", "")
-        models_path.mkdir(parents=True, exist_ok=True)
-        thresholds_file = models_path / f"{model_type}_thresholds.json"
-        with open(thresholds_file, "w") as f:
+        with open(thresholds_file, "w", encoding="utf-8") as f:
             json.dump(tuned_thresholds, f, indent=2)
         print(f"  Saved to: {thresholds_file}")
-        
-        # Re-evaluate validation set with tuned thresholds for fair comparison
+
         print("\nRe-evaluating validation set with tuned thresholds...")
         from evaluation.metrics import calculate_f1_scores
-        import numpy as np
+
         X_val, y_val = val_data
         y_val_proba = model.predict_proba(X_val)
         y_val_pred = np.zeros_like(y_val_proba)
         for i, label in enumerate(labels):
             y_val_pred[:, i] = (y_val_proba[:, i] >= tuned_thresholds[label]).astype(int)
         val_f1_with_tuned = calculate_f1_scores(y_val, y_val_pred)
-        val_metrics['f1_macro'] = val_f1_with_tuned['macro']
-        val_metrics['f1_micro'] = val_f1_with_tuned['micro']
-        val_metrics['f1_weighted'] = val_f1_with_tuned['weighted']
+        val_metrics["f1_macro"] = val_f1_with_tuned["macro"]
+        val_metrics["f1_micro"] = val_f1_with_tuned["micro"]
+        val_metrics["f1_weighted"] = val_f1_with_tuned["weighted"]
         print(f"  Val F1 macro (with tuned thresholds): {val_f1_with_tuned['macro']:.4f}")
 
     # Evaluate on test set
@@ -248,7 +312,7 @@ def main() -> int:
         ("Calibration", outputs_dir / f"calibration_reliability_{model_type}.png"),
         ("Test summary dashboard", outputs_dir / f"test_summary_dashboard_{model_type}.png"),
         ("P/R/F1 by label", outputs_dir / f"per_label_precision_recall_f1_{model_type}.png"),
-        ("MCC & Cohen's κ", outputs_dir / f"mcc_kappa_per_label_{model_type}.png"),
+        ("MCC & Cohen kappa", outputs_dir / f"mcc_kappa_per_label_{model_type}.png"),
         ("Label correlation", outputs_dir / f"label_correlation_{model_type}.png"),
         ("Probability histograms", outputs_dir / f"probability_histograms_{model_type}.png"),
         ("Labels per sample", outputs_dir / f"labels_per_sample_hist_{model_type}.png"),

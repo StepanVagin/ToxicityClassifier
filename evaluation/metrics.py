@@ -1387,7 +1387,7 @@ def save_metrics_to_file(
     """
     col_w = 14
 
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8", newline="\n") as f:
         f.write("=" * 60 + "\n")
         f.write(f"EVALUATION RESULTS - {model_type}\n")
         f.write(f"Timestamp: {results['timestamp']}\n")
@@ -1407,31 +1407,31 @@ def save_metrics_to_file(
         f.write(f"Gini Macro:    {gini_macro:.3f}\n\n")
 
         f.write("MULTILABEL & PROBABILISTIC METRICS\n")
-        f.write(f"Hamming loss (↓ better):           {results['hamming_loss']:.4f}\n")
-        f.write(f"Subset accuracy (exact match):   {results['subset_accuracy']:.4f}\n")
+        f.write(f"Hamming loss (lower is better):     {results['hamming_loss']:.4f}\n")
+        f.write(f"Subset accuracy (exact match):      {results['subset_accuracy']:.4f}\n")
         jac = results["jaccard_scores"]
         f.write(
-            f"Jaccard — macro: {jac['macro']:.4f}  micro: {jac['micro']:.4f}  "
+            f"Jaccard - macro: {jac['macro']:.4f}  micro: {jac['micro']:.4f}  "
             f"samples: {jac['samples']:.4f}\n"
         )
         f.write(
-            f"Mean multilabel log loss (↓):    {results['multilabel_log_loss']:.4f}\n"
+            f"Mean multilabel log loss (lower): {results['multilabel_log_loss']:.4f}\n"
         )
         f.write(
-            f"Brier score macro (↓):            {results['brier_scores']['macro']:.4f}\n"
+            f"Brier score macro (lower):        {results['brier_scores']['macro']:.4f}\n"
         )
         lrm = results["label_ranking_metrics"]
         lrap = lrm["label_ranking_avg_precision"]
         lrl = lrm["label_ranking_loss"]
         f.write(
-            f"Label ranking avg precision (↑): {lrap:.4f}\n"
+            f"Label ranking avg precision (higher): {lrap:.4f}\n"
             if not np.isnan(lrap)
-            else "Label ranking avg precision (↑): N/A\n"
+            else "Label ranking avg precision (higher): N/A\n"
         )
         f.write(
-            f"Label ranking loss (↓, masked):   {lrl:.4f}\n"
+            f"Label ranking loss (lower, masked):   {lrl:.4f}\n"
             if not np.isnan(lrl)
-            else "Label ranking loss (↓, masked):   N/A\n"
+            else "Label ranking loss (lower, masked):   N/A\n"
         )
         f.write("\n")
 
