@@ -12,6 +12,7 @@
     "weight_decay": 0.01
   },
   "training": {
+    "device": "auto",
     "gradient_clip": 1.0,
     "fp16": true,
     "early_stopping_patience": 2

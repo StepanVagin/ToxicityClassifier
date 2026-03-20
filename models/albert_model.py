@@ -4,6 +4,19 @@ ALBERT-base-v2 model for multilabel toxicity classification.
 
 Implements ModelABC interface for compatibility with trainer.py and run_pipeline.py.
 Uses HuggingFace transformers with BCEWithLogitsLoss for multi-label classification.
+
+Checkpoint loading (e.g. ``albert-base-v2``)
+--------------------------------------------
+Pretrained ALBERT weights are from **masked language modeling** (MLM). When Hugging Face loads
+them into ``AlbertForSequenceClassification``, you may see a load report like:
+
+- **UNEXPECTED** ``predictions.*`` — the old MLM head; it is not used for classification and
+  can be ignored.
+- **MISSING** ``classifier.*`` — the classification head did not exist in the checkpoint; it is
+  **initialized at random** and must be learned during fine-tuning. This is normal before/while
+  you train on your labels.
+
+We pass ``ignore_mismatched_sizes=True`` so partial weight loading is explicit and quieter.
 """
 
 import os
@@ -19,6 +32,30 @@ from transformers import (
 )
 
 from .abc_model import ModelABC
+
+
+def _resolve_torch_device(train_cfg: dict) -> torch.device:
+    """
+    Pick compute device from config ``training.device``.
+
+    - ``auto`` (default): CUDA if ``torch.cuda.is_available()`` else CPU.
+    - ``cuda`` / ``gpu``: require CUDA or raise (fails fast instead of silent CPU).
+    - ``cpu``: CPU only.
+    - Any other string is passed to ``torch.device`` (e.g. ``cuda:0``).
+    """
+    spec = str(train_cfg.get("device", "auto")).strip().lower()
+    if spec in ("auto", ""):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if spec in ("cuda", "gpu"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "training.device is 'cuda' but torch.cuda.is_available() is False. "
+                "Install a CUDA build of PyTorch (see https://pytorch.org/get-started/locally/)."
+            )
+        return torch.device("cuda")
+    if spec == "cpu":
+        return torch.device("cpu")
+    return torch.device(spec)
 
 
 class ToxicityDataset(Dataset):
@@ -104,7 +141,8 @@ class ALBERTModel(ModelABC):
 
         model_name = config.get("model_name", "albert-base-v2")
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_torch_device(train_cfg)
+        print(f"ALBERTModel: using device {self.device}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -114,9 +152,11 @@ class ALBERTModel(ModelABC):
         model_config.num_labels = 6
         model_config.problem_type = "multi_label_classification"
 
+        # Backbone from MLM checkpoint; classifier head is new (see module docstring).
         self.model = AutoModelForSequenceClassification.from_pretrained(
             model_name,
             config=model_config,
+            ignore_mismatched_sizes=True,
         )
         self.model.to(self.device)
 
@@ -363,7 +403,10 @@ class ALBERTModel(ModelABC):
     def load(self, path: str) -> None:
         """Load model and tokenizer from disk."""
         load_dir = path[:-4] if path.endswith(".pkl") else path
-        self.model = AutoModelForSequenceClassification.from_pretrained(load_dir)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            load_dir,
+            ignore_mismatched_sizes=True,
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(load_dir)
         self.model.to(self.device)
         self._last_save_path = load_dir
