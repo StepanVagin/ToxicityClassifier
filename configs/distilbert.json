@@ -1,0 +1,26 @@
+{
+  "model_type": "distilbert",
+  "model_name": "distilbert-base-uncased",
+  "preprocessing": {
+    "max_length": 128,
+    "truncation": true,
+    "padding": true
+  },
+  "hyperparameters": {
+    "learning_rate": 2e-5,
+    "batch_size": 32,
+    "epochs": 3,
+    "warmup_steps": 500,
+    "weight_decay": 0.01
+  },
+  "training": {
+    "device": "auto",
+    "show_progress": true,
+    "gradient_clip": 1.0,
+    "fp16": true,
+    "early_stopping_patience": 2
+  },
+  "tensor_decomposition": {
+    "enabled": false
+  }
+}

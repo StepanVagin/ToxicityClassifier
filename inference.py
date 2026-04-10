@@ -57,6 +57,7 @@ def load_model_and_config(model_dir: Path, model_type: str = "logistic_regressio
     model_config_map = {
         "logistic_regression": "logistic_regression.json",
         "albert": "albert.json",
+        "distilbert": "distilbert.json",
     }
     model_json = model_config_map.get(model_type, f"{model_type}.json")
     model_config_path = PROJECT_ROOT / "configs" / model_json

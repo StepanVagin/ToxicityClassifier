@@ -8,4 +8,8 @@ def create_model(config):
         from models.albert_model import ALBERTModel
 
         return ALBERTModel(config)
+    if model_type == "distilbert":
+        from models.distilbert_model import DistilBERTModel
+
+        return DistilBERTModel(config)
     raise ValueError(f"Unknown model type: {model_type}")
