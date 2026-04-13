@@ -1,5 +1,6 @@
 from typing import List, Tuple
 import os
+import tempfile
 import numpy as np
 
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -108,10 +109,14 @@ class LogisticRegressionModel(ModelABC):
 
     def get_model_size(self) -> float:
         """Returns model size in MB after saving."""
-        tmp_path = "/tmp/_model_size_check.pkl"
-        joblib.dump(self.pipeline, tmp_path)
-        size = os.path.getsize(tmp_path) / (1024 * 1024)
-        os.remove(tmp_path)
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            joblib.dump(self.pipeline, tmp_path)
+            size = os.path.getsize(tmp_path) / (1024 * 1024)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         return round(size, 2)
 
 

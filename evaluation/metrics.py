@@ -164,8 +164,8 @@ def calculate_gini_from_roc_auc(roc_auc_scores: Dict[str, float]) -> Dict[str, f
         Dictionary mapping label names to Gini values.
     """
     return {
-        label: float(2 * auc - 1) if not np.isnan(auc) else float("nan")
-        for label, auc in roc_auc_scores.items()
+        label: float(2 * score - 1) if not np.isnan(score) else float("nan")
+        for label, score in roc_auc_scores.items()
     }
 
 

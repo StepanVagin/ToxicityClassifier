@@ -49,7 +49,7 @@ def train_model(
     train_data: Tuple[List[str], np.ndarray],
     val_data: Optional[Tuple[List[str], np.ndarray]],
     config: Dict[str, Any],
-) -> Tuple[Any, float, Dict[str, Any]]:
+) -> Tuple[Any, float, Dict[str, Any], Dict[str, Any]]:
     """
     Main training orchestrator.
 

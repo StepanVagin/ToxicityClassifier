@@ -59,10 +59,11 @@ def load_config(base_path: Path, model_config_path: Path = None) -> dict:
     return config
 
 
-def _resolve_outputs_dir(base_path: Path, config: dict) -> Path:  # ←
+def _resolve_outputs_dir(base_path: Path, config: dict) -> Path:
     """Resolve and create outputs directory from config."""
     raw = config.get("paths", {}).get("outputs_dir", "./outputs")
-    path = Path(raw) if Path(raw).is_absolute() else base_path / raw.lstrip("./")
+    raw_path = Path(raw)
+    path = raw_path if raw_path.is_absolute() else (base_path / raw_path).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -113,7 +114,11 @@ def main() -> int:
     print("=" * 60)
     if args.skip_download:
         processed_dir = config.get("paths", {}).get("processed_dir", "./data/processed")
-        processed_path = base_path / processed_dir.replace("./", "")
+        processed_path_raw = Path(processed_dir)
+        processed_path = (
+            processed_path_raw if processed_path_raw.is_absolute()
+            else (base_path / processed_path_raw).resolve()
+        )
         csv_path = processed_path / "train.csv"
         test_csv = processed_path / "test.csv"
         test_labels_csv = processed_path / "test_labels.csv"
@@ -144,7 +149,11 @@ def main() -> int:
     test_data  = (X_test,  y_test)
 
     models_dir = config.get("paths", {}).get("models_dir", "./models/saved")
-    models_path = base_path / models_dir.replace("./", "")
+    models_path_raw = Path(models_dir)
+    models_path = (
+        models_path_raw if models_path_raw.is_absolute()
+        else (base_path / models_path_raw).resolve()
+    )
     models_path.mkdir(parents=True, exist_ok=True)
     model_pkl = models_path / f"{model_type}.pkl"
     model_hf_dir = models_path / model_type
