@@ -32,6 +32,16 @@ from transformers import (
 )
 
 from .abc_model import ModelABC
+from .hf_multilabel_utils import (
+    ToxicityTextDataset,
+    build_llrd_parameter_groups,
+    compute_bce_pos_weights,
+    count_optimizer_steps_per_epoch,
+    decoupling_penalty,
+    decoupling_weight_matrix,
+    label_correlation_matrix,
+    make_dynamic_padding_collate_fn,
+)
 
 
 def _resolve_torch_device(train_cfg: dict) -> torch.device:
@@ -177,21 +187,52 @@ class ALBERTModel(ModelABC):
             Same format as train_data. Used for validation and early stopping.
         """
         X_train, y_train = train_data
+        if not isinstance(y_train, np.ndarray):
+            y_train = np.asarray(y_train, dtype=np.float32)
+        else:
+            y_train = y_train.astype(np.float32)
 
-        train_dataset = ToxicityDataset(
-            X_train, y_train, self.tokenizer, max_length=self.max_length
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=0,
-            pin_memory=(self.device.type == "cuda"),
-        )
+        train_cfg = self.config.get("training", {})
+        dynamic_padding = bool(train_cfg.get("dynamic_padding", False))
+        grad_accum = max(int(train_cfg.get("gradient_accumulation_steps", 1)), 1)
+        use_pos_weight = bool(train_cfg.get("use_pos_weight", False))
+        pos_weight_max = train_cfg.get("pos_weight_max")
+        use_llrd = bool(train_cfg.get("use_llrd", False))
+        llrd_gamma = float(train_cfg.get("llrd_decay", 0.9))
+        head_lr_mult = float(train_cfg.get("head_lr_multiplier", 1.0))
+        decouple_w = float(train_cfg.get("label_decouple_weight", 0.0) or 0.0)
+        decouple_tau = float(train_cfg.get("label_decouple_correlation_threshold", 0.2))
+
+        if dynamic_padding:
+            train_dataset: Dataset = ToxicityTextDataset(X_train, y_train)
+            collate_fn = make_dynamic_padding_collate_fn(self.tokenizer, self.max_length)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=(self.device.type == "cuda"),
+                collate_fn=collate_fn,
+            )
+        else:
+            train_dataset = ToxicityDataset(
+                X_train, y_train, self.tokenizer, max_length=self.max_length
+            )
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=(self.device.type == "cuda"),
+            )
 
         val_loader = None
         if val_data is not None:
             X_val, y_val = val_data
+            if not isinstance(y_val, np.ndarray):
+                y_val = np.asarray(y_val, dtype=np.float32)
+            else:
+                y_val = y_val.astype(np.float32)
             val_dataset = ToxicityDataset(
                 X_val, y_val, self.tokenizer, max_length=self.max_length
             )
@@ -202,20 +243,46 @@ class ALBERTModel(ModelABC):
                 num_workers=0,
             )
 
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay,
-        )
+        if use_llrd:
+            param_groups = build_llrd_parameter_groups(
+                self.model,
+                base_lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+                gamma=llrd_gamma,
+                head_lr_multiplier=head_lr_mult,
+            )
+            optimizer = torch.optim.AdamW(param_groups)
+        else:
+            optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+            )
 
-        total_steps = len(train_loader) * self.epochs
+        n_train_batches = len(train_loader)
+        steps_per_epoch = count_optimizer_steps_per_epoch(n_train_batches, grad_accum)
+        total_steps = max(steps_per_epoch * self.epochs, 1)
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
             num_warmup_steps=self.warmup_steps,
             num_training_steps=total_steps,
         )
 
-        criterion = torch.nn.BCEWithLogitsLoss()
+        if use_pos_weight:
+            pw = compute_bce_pos_weights(
+                y_train,
+                max_weight=float(pos_weight_max) if pos_weight_max is not None else None,
+            ).to(self.device)
+            criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
+        else:
+            criterion = torch.nn.BCEWithLogitsLoss()
+
+        decouple_matrix: Optional[torch.Tensor] = None
+        if decouple_w > 0.0:
+            r = label_correlation_matrix(y_train)
+            w_np = decoupling_weight_matrix(r, decouple_tau)
+            decouple_matrix = torch.tensor(w_np, dtype=torch.float32, device=self.device)
+
         scaler = torch.amp.GradScaler("cuda") if self.fp16 and self.device.type == "cuda" else None
 
         self.training_history = {
@@ -239,6 +306,7 @@ class ALBERTModel(ModelABC):
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss = 0.0
+            optimizer.zero_grad(set_to_none=True)
 
             pbar = None
             train_iter = train_loader
@@ -256,8 +324,6 @@ class ALBERTModel(ModelABC):
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
 
-                optimizer.zero_grad()
-
                 if self.fp16 and scaler is not None:
                     with torch.amp.autocast("cuda"):
                         outputs = self.model(
@@ -265,30 +331,56 @@ class ALBERTModel(ModelABC):
                             attention_mask=attention_mask,
                         )
                         logits = outputs.logits
-                        loss = criterion(logits, labels)
+                        bce = criterion(logits, labels)
+                        if decouple_matrix is not None:
+                            extra = decoupling_penalty(
+                                torch.sigmoid(logits), decouple_matrix
+                            )
+                        else:
+                            extra = logits.new_tensor(0.0)
+                        loss = (bce + decouple_w * extra) / grad_accum
                     scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                    scaler.step(optimizer)
-                    scaler.update()
                 else:
                     outputs = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                     )
                     logits = outputs.logits
-                    loss = criterion(logits, labels)
+                    bce = criterion(logits, labels)
+                    if decouple_matrix is not None:
+                        extra = decoupling_penalty(
+                            torch.sigmoid(logits), decouple_matrix
+                        )
+                    else:
+                        extra = logits.new_tensor(0.0)
+                    loss = (bce + decouple_w * extra) / grad_accum
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                    optimizer.step()
 
-                scheduler.step()
-                lv = loss.item()
+                lv = float((bce + decouple_w * extra).detach().item())
                 epoch_loss += lv
+
+                should_step = (batch_idx % grad_accum == 0) or (batch_idx == n_train_batches)
+                if should_step:
+                    if self.fp16 and scaler is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.gradient_clip
+                        )
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.gradient_clip
+                        )
+                        optimizer.step()
+
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+
                 if pbar is not None:
                     pbar.set_postfix(loss=f"{epoch_loss / batch_idx:.4f}")
 
-            avg_loss = epoch_loss / len(train_loader)
+            avg_loss = epoch_loss / max(len(train_loader), 1)
             print(f"Epoch {epoch + 1}/{self.epochs} - Train loss: {avg_loss:.4f}")
 
             ep = epoch + 1
