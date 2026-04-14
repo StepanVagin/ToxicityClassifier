@@ -2,16 +2,16 @@
   "model_type": "distilbert",
   "model_name": "distilbert-base-uncased",
   "preprocessing": {
-    "max_length": 128,
+    "max_length": 256,
     "truncation": true,
     "padding": true
   },
   "hyperparameters": {
     "learning_rate": 2e-5,
     "batch_size": 16,
-    "epochs": 3,
+    "epochs": 6,
     "warmup_steps": 500,
-    "weight_decay": 0.01
+    "weight_decay": 0.05
   },
   "training": {
     "device": "auto",
@@ -20,7 +20,7 @@
     "fp16": true,
     "early_stopping_patience": 2,
     "use_pos_weight": true,
-    "pos_weight_max": 1000,
+    "pos_weight_max": 5,
     "use_llrd": true,
     "llrd_decay": 0.9,
     "head_lr_multiplier": 1.0,

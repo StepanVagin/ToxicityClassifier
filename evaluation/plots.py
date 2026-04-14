@@ -32,15 +32,36 @@ def plot_training_history(
     val_fi = history.get("val_f1_micro", [])
     val_fw = history.get("val_f1_weighted", [])
     lrs = history.get("learning_rate", [])
+    batch_steps = history.get("batch_step", [])
+    batch_losses = history.get("batch_train_loss", [])
+    epoch_boundaries = history.get("epoch_boundaries", [])
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), squeeze=False)
 
     ax = axes[0, 0]
-    ax.plot(epochs, train_loss, "o-", color="#2c7fb8", linewidth=2, markersize=6, label="Train loss")
-    if val_loss and len(val_loss) == len(epochs):
-        ax.plot(epochs, val_loss, "s--", color="#e34a33", linewidth=2, markersize=6, label="Val loss")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("BCE loss (avg per batch)")
+    use_batch_loss = bool(batch_steps and batch_losses and len(batch_steps) == len(batch_losses))
+    if use_batch_loss:
+        ax.plot(batch_steps, batch_losses, color="#2c7fb8", linewidth=0.8, alpha=0.6, label="Train loss (batch)")
+        # Overlay epoch-average train loss at epoch boundaries
+        if train_loss and epoch_boundaries and len(train_loss) == len(epoch_boundaries):
+            ax.plot(epoch_boundaries, train_loss, "o", color="#08519c", markersize=7,
+                    zorder=5, label="Train loss (epoch avg)")
+        # Vertical lines at epoch boundaries
+        for i, xb in enumerate(epoch_boundaries):
+            ax.axvline(xb, color="gray", linestyle="--", linewidth=0.8, alpha=0.5,
+                       label="Epoch end" if i == 0 else None)
+        # Val loss at epoch boundaries
+        if val_loss and epoch_boundaries and len(val_loss) == len(epoch_boundaries):
+            ax.plot(epoch_boundaries, val_loss, "s--", color="#e34a33", linewidth=2,
+                    markersize=6, label="Val loss (epoch)")
+        ax.set_xlabel("Batch step (global)")
+        ax.set_ylabel("BCE loss")
+    else:
+        ax.plot(epochs, train_loss, "o-", color="#2c7fb8", linewidth=2, markersize=6, label="Train loss")
+        if val_loss and len(val_loss) == len(epochs):
+            ax.plot(epochs, val_loss, "s--", color="#e34a33", linewidth=2, markersize=6, label="Val loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("BCE loss (avg per batch)")
     ax.set_title("Loss")
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3)
@@ -71,15 +92,19 @@ def plot_training_history(
 
     ax = axes[1, 1]
     gap = None
+    x_gap = epochs
     if train_loss and val_loss and len(train_loss) == len(val_loss) == len(epochs):
         t = np.asarray(train_loss, dtype=float)
         v = np.asarray(val_loss, dtype=float)
         if np.all(np.isfinite(t) & np.isfinite(v)):
             gap = t - v
+            if use_batch_loss and epoch_boundaries and len(epoch_boundaries) == len(epochs):
+                x_gap = epoch_boundaries
     if gap is not None:
-        ax.bar(epochs, gap, color="#35978f", alpha=0.85, edgecolor="black", linewidth=0.5)
+        width = (x_gap[-1] - x_gap[0]) / max(len(x_gap) * 1.5, 1) if len(x_gap) > 1 else 0.6
+        ax.bar(x_gap, gap, width=width, color="#35978f", alpha=0.85, edgecolor="black", linewidth=0.5)
         ax.axhline(0, color="gray", linestyle="--", linewidth=1)
-        ax.set_xlabel("Epoch")
+        ax.set_xlabel("Batch step (global)" if use_batch_loss else "Epoch")
         ax.set_ylabel("Train loss − Val loss")
         ax.set_title("Generalization gap (↓ overfitting if stable)")
         ax.grid(True, axis="y", alpha=0.3)

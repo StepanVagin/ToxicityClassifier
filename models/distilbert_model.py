@@ -333,11 +333,15 @@ class DistilBERTModel(ModelABC):
             "val_f1_micro": [],
             "val_f1_weighted": [],
             "learning_rate": [],
+            "batch_step": [],
+            "batch_train_loss": [],
+            "epoch_boundaries": [],  # global batch step at which each epoch ends
         }
 
         best_val_loss = float("inf")
         best_state_dict: Optional[Dict[str, torch.Tensor]] = None
         patience_counter = 0
+        global_batch_step = 0
 
         try:
             from tqdm.auto import tqdm as _tqdm
@@ -399,6 +403,9 @@ class DistilBERTModel(ModelABC):
 
                 lv = float((bce + decouple_w * extra).detach().item())
                 epoch_loss += lv
+                global_batch_step += 1
+                self.training_history["batch_step"].append(global_batch_step)
+                self.training_history["batch_train_loss"].append(lv)
 
                 should_step = (batch_idx % grad_accum == 0) or (batch_idx == n_train_batches)
                 if should_step:
@@ -427,6 +434,7 @@ class DistilBERTModel(ModelABC):
             ep = epoch + 1
             self.training_history["epoch"].append(ep)
             self.training_history["train_loss"].append(float(avg_loss))
+            self.training_history["epoch_boundaries"].append(global_batch_step)
             self.training_history["learning_rate"].append(
                 float(scheduler.get_last_lr()[0])
             )
