@@ -9,16 +9,15 @@ DistilBERT does not use token_type_ids; the dataset and forward pass omit them.
 
 Tensor decomposition
 ----------------------
-Optional config key tensor_decomposition reserves hooks for future compression /
-decomposition work. 
+Optional ``config["tensor_decomposition"]`` block applies truncated-SVD
+low-rank factorization to selected ``nn.Linear`` layers after the pretrained
+weights are loaded. See ``models.tensor_decomposition`` for the schema.
 """
-# TODO: The decomposition algorithm 
 
 from __future__ import annotations
 
 import copy
 import os
-import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -32,6 +31,12 @@ from transformers import (
 )
 
 from .abc_model import ModelABC
+from .tensor_decomposition import (
+    apply_tensor_decomposition,
+    load_hf_state_dict as _load_hf_state_dict,
+    load_td_config,
+    save_td_config,
+)
 from .hf_multilabel_utils import (
     ToxicityTextDataset,
     build_llrd_parameter_groups,
@@ -168,14 +173,6 @@ class DistilBERTModel(ModelABC):
         self._tensor_decomposition_config: Dict[str, Any] = dict(
             config.get("tensor_decomposition") or {}
         )
-        if self._tensor_decomposition_config.get("enabled", False):
-            warnings.warn(
-                "config['tensor_decomposition']['enabled'] is True but tensor "
-                "decomposition is not implemented; training uses the full DistilBERT "
-                "weights. Use apply_tensor_decomposition() when a backend is available.",
-                UserWarning,
-                stacklevel=2,
-            )
 
         model_name = config.get("model_name", "distilbert-base-uncased")
 
@@ -193,6 +190,12 @@ class DistilBERTModel(ModelABC):
             config=model_config,
             ignore_mismatched_sizes=True,
         )
+
+        if self._tensor_decomposition_config.get("enabled", False):
+            apply_tensor_decomposition(
+                self.model, self._tensor_decomposition_config, verbose=True
+            )
+
         self.model.to(self.device)
 
         self._last_save_path: Optional[str] = None
@@ -200,16 +203,8 @@ class DistilBERTModel(ModelABC):
 
     @property
     def tensor_decomposition_config(self) -> Dict[str, Any]:
-        """Config subtree reserved for future tensor-decomposition options."""
+        """Active tensor-decomposition config (empty if disabled)."""
         return dict(self._tensor_decomposition_config)
-
-    def apply_tensor_decomposition(self, **kwargs: Any) -> None:
-        # TODO: Implement tensor decomposition
-        raise NotImplementedError(
-            "Tensor decomposition is not implemented. "
-            "Configure optional keys under config['tensor_decomposition'] for future use; "
-            "call this method when a backend is added."
-        )
 
     def train(self, train_data: Tuple, val_data: Optional[Tuple] = None) -> None:
         """
@@ -570,24 +565,45 @@ class DistilBERTModel(ModelABC):
         return (proba >= threshold).astype(np.int32)
 
     def save(self, path: str) -> None:
-        """Save model and tokenizer to disk (HuggingFace format)."""
+        """Save model and tokenizer to disk (HuggingFace format).
+
+        If tensor decomposition was applied, the td_config.json is saved
+        alongside so load() can rebuild the decomposed architecture.
+        """
         save_dir = path[:-4] if path.endswith(".pkl") else path
         os.makedirs(save_dir, exist_ok=True)
         self.model.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)
+        save_td_config(save_dir, self._tensor_decomposition_config)
         self._last_save_path = save_dir
 
     def load(self, path: str) -> None:
-        """Load model and tokenizer from disk."""
+        """Load model and tokenizer from disk.
+
+        Detects a saved ``td_config.json``; if present, rebuilds the decomposed
+        architecture before loading weights.
+        """
         load_dir = path[:-4] if path.endswith(".pkl") else path
         if not os.path.isdir(load_dir):
             raise FileNotFoundError(
                 f"Expected a HuggingFace model directory at {load_dir!r}."
             )
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            load_dir,
-            ignore_mismatched_sizes=True,
-        )
+
+        td_cfg = load_td_config(load_dir)
+        if td_cfg and td_cfg.get("enabled", False):
+            model_config = AutoConfig.from_pretrained(load_dir)
+            self.model = AutoModelForSequenceClassification.from_config(model_config)
+            apply_tensor_decomposition(self.model, td_cfg, verbose=False)
+            state_dict = _load_hf_state_dict(load_dir)
+            self.model.load_state_dict(state_dict, strict=False)
+            self._tensor_decomposition_config = dict(td_cfg)
+        else:
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                load_dir,
+                ignore_mismatched_sizes=True,
+            )
+            self._tensor_decomposition_config = {}
+
         self.tokenizer = AutoTokenizer.from_pretrained(load_dir)
         self.model.to(self.device)
         self._last_save_path = load_dir

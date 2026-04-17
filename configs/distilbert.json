@@ -30,6 +30,20 @@
     "label_decouple_correlation_threshold": 0.2
   },
   "tensor_decomposition": {
-    "enabled": false
+    "enabled": false,
+    "method": "svd",
+    "rank_ratio": 0.5,
+    "rank": null,
+    "energy": null,
+    "target_patterns": [
+      "ffn.lin1",
+      "ffn.lin2",
+      "attention.q_lin",
+      "attention.k_lin",
+      "attention.v_lin",
+      "attention.out_lin"
+    ],
+    "exclude_patterns": [],
+    "min_params": 100000
   }
 }
