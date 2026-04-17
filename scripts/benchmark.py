@@ -39,6 +39,83 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np  # noqa: E402
 
 from models import create_model  # noqa: E402
+from models.tensor_decomposition import (  # noqa: E402
+    LowRankLinear,
+    load_hf_state_dict,
+    load_td_config,
+)
+
+
+def _set_submodule(root, qualified_name: str, new_module) -> None:
+    parts = qualified_name.split(".")
+    parent = root
+    for p in parts[:-1]:
+        parent = getattr(parent, p)
+    setattr(parent, parts[-1], new_module)
+
+
+def _load_hf_with_inferred_td(model_obj, load_dir: str) -> bool:
+    """Rebuild a decomposed HF model using ranks inferred from the saved state_dict.
+
+    Works around a save/load mismatch where ``apply_tensor_decomposition`` re-resolves
+    ranks from fresh pretrained weights instead of the trained checkpoint. Returns
+    True if the checkpoint required (and received) inferred-rank loading.
+    """
+    td_cfg = load_td_config(load_dir)
+    if not td_cfg or not td_cfg.get("enabled", False):
+        return False
+
+    import torch.nn as nn
+    from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+
+    state_dict = load_hf_state_dict(load_dir)
+
+    # Derive per-layer ranks from `{name}.A.weight` shape = (rank, in_features)
+    # and cross-check against `{name}.B.weight` shape = (out_features, rank).
+    shapes: Dict[str, Dict[str, int]] = {}
+    for key, tensor in state_dict.items():
+        if key.endswith(".A.weight"):
+            name = key[: -len(".A.weight")]
+            shapes.setdefault(name, {})["rank"] = int(tensor.shape[0])
+            shapes[name]["in_features"] = int(tensor.shape[1])
+        elif key.endswith(".B.weight"):
+            name = key[: -len(".B.weight")]
+            shapes.setdefault(name, {})["out_features"] = int(tensor.shape[0])
+
+    if not shapes:
+        return False
+
+    model_config = AutoConfig.from_pretrained(load_dir)
+    hf_model = AutoModelForSequenceClassification.from_config(model_config)
+
+    for name, info in shapes.items():
+        if {"in_features", "out_features", "rank"} - info.keys():
+            continue
+        parts = name.split(".")
+        parent = hf_model
+        for p in parts[:-1]:
+            parent = getattr(parent, p)
+        orig = getattr(parent, parts[-1])
+        has_bias = isinstance(orig, nn.Linear) and orig.bias is not None
+        lr = LowRankLinear(
+            in_features=info["in_features"],
+            out_features=info["out_features"],
+            rank=info["rank"],
+            bias=has_bias,
+        )
+        setattr(parent, parts[-1], lr)
+
+    missing, unexpected = hf_model.load_state_dict(state_dict, strict=False)
+    if unexpected:
+        print(f"  (load: {len(unexpected)} unexpected keys ignored)")
+    if missing:
+        print(f"  (load: {len(missing)} missing keys left at init)")
+
+    model_obj.model = hf_model.to(model_obj.device)
+    model_obj.tokenizer = AutoTokenizer.from_pretrained(load_dir)
+    model_obj._tensor_decomposition_config = dict(td_cfg)
+    model_obj._last_save_path = load_dir
+    return True
 
 
 MODELS: Dict[str, Dict[str, Any]] = {
@@ -238,7 +315,11 @@ def benchmark_one(
         model = create_model(cfg)
         if has_saved:
             pkl = str(PROJECT_ROOT / "models" / "saved" / f"{model_type}.pkl")
-            model.load(pkl)
+            hf_dir = PROJECT_ROOT / "models" / "saved" / model_type
+            if hf_dir.is_dir() and _load_hf_with_inferred_td(model, str(hf_dir)):
+                pass  # architecture rebuilt from state_dict shapes
+            else:
+                model.load(pkl)
     except Exception as e:
         msg = f"Failed to instantiate/load model: {e}"
         print(f"  Skipping: {msg}")
